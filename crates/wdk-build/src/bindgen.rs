@@ -1,6 +1,36 @@
 // Copyright (c) Microsoft Corporation
 // License: MIT OR Apache-2.0
 
+//! Bindgen integration for generating WDK FFI bindings.
+//!
+//! This module provides an extension trait [`BuilderExt`] for [`bindgen::Builder`]
+//! that configures bindgen with all necessary WDK-specific settings including:
+//! - Include paths for WDK headers
+//! - Preprocessor definitions for the driver model
+//! - Compiler flags for MSVC compatibility
+//! - Blocklisting deprecated APIs
+//! - Special handling for WDF function tables
+//!
+//! # Usage
+//!
+//! ```rust,no_run
+//! use wdk_build::{Config, ApiSubset, BuilderExt};
+//!
+//! let config = Config::from_env_auto().unwrap();
+//!
+//! let bindings = bindgen::Builder::default()
+//!     .configure_wdk(&config, &[ApiSubset::Base, ApiSubset::Wdf])
+//!     .unwrap()
+//!     .generate()
+//!     .unwrap();
+//!
+//! // Write bindings to file
+//! let out_path = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+//! bindings
+//!     .write_to_file(out_path.join("bindings.rs"))
+//!     .unwrap();
+//! ```
+
 use std::{borrow::Borrow, fmt};
 
 use bindgen::{
@@ -12,16 +42,114 @@ use tracing::debug;
 
 use crate::{Config, ConfigError, DriverConfig, find_top_level_cargo_manifest};
 
-/// An extension trait that provides a way to create a [`bindgen::Builder`]
-/// configured for generating bindings to the wdk
+/// Extension trait for configuring [`bindgen::Builder`] for WDK bindings.
+///
+/// Provides the [`wdk_default`](BuilderExt::wdk_default) method to create a
+/// `bindgen::Builder` pre-configured with all WDK-specific settings.
+///
+/// # What It Configures
+///
+/// - **`use_core()`**: Generates `#![no_std]` bindings for kernel mode
+/// - **Include paths**: All WDK header directories for the driver model
+/// - **Preprocessor definitions**: Architecture and driver-model-specific macros
+/// - **Compiler flags**: MSVC compatibility flags for bindgen's clang parser
+/// - **Deprecated API blocklist**: Excludes obsolete functions (e.g., `ExAllocatePool`)
+/// - **Type attributes**: `#[must_use]` on `NTSTATUS` and `HRESULT`
+/// - **WDF function table**: Renames versioned symbol to `WdfFunctions`
+/// - **Rust edition**: Matches the calling crate's edition (2018, 2021, 2024)
+/// - **Formatting**: Uses `prettyplease` for formatted output
+///
+/// # Examples
+///
+/// Basic usage with default WDK configuration:
+///
+/// ```rust,no_run
+/// use wdk_build::{Config, BuilderExt};
+///
+/// let config = Config::from_env_auto().unwrap();
+///
+/// // Create a pre-configured builder
+/// let bindings = bindgen::Builder::wdk_default(&config)
+///     .unwrap()
+///     .header_contents("wrapper.h", "#include <ntddk.h>")
+///     .generate()
+///     .unwrap();
+/// ```
+///
+/// Customize after default configuration:
+///
+/// ```rust,no_run
+/// use wdk_build::{Config, BuilderExt};
+///
+/// let config = Config::from_env_auto().unwrap();
+///
+/// let bindings = bindgen::Builder::wdk_default(&config)
+///     .unwrap()
+///     .header_contents("wrapper.h", "#include <ntddk.h>")
+///     // Add custom configuration
+///     .allowlist_function("MyDriverFunction")
+///     .blocklist_type("InternalType")
+///     .generate()
+///     .unwrap();
+/// ```
 pub trait BuilderExt {
-    /// Returns a `bindgen::Builder` with the default configuration for
-    /// generation of bindings to the WDK
+    /// Creates a [`bindgen::Builder`] pre-configured for WDK bindings.
+    ///
+    /// This method configures bindgen with all necessary WDK-specific settings
+    /// including include paths, preprocessor definitions, compiler flags, and
+    /// special handling for WDF function tables.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - WDK configuration (typically from [`Config::from_env_auto`](crate::Config::from_env_auto))
+    ///
+    /// # Returns
+    ///
+    /// A pre-configured [`Builder`] ready for header processing.
     ///
     /// # Errors
     ///
-    /// Implementation may return `wdk_build::ConfigError` if it fails to create
-    /// a builder
+    /// Returns [`ConfigError`] if:
+    /// - WDK include paths cannot be resolved
+    /// - Required directories don't exist
+    /// - Rust edition is unsupported by bindgen
+    /// - MSRV cannot be parsed
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use wdk_build::{Config, BuilderExt};
+    ///
+    /// let config = Config::from_env_auto().unwrap();
+    ///
+    /// let bindings = bindgen::Builder::wdk_default(&config)
+    ///     .unwrap()
+    ///     .header_contents("wrapper.h", r#"
+    ///         #include <ntddk.h>
+    ///         #include <wdf.h>
+    ///     "#)
+    ///     .allowlist_function("WdfDriverCreate")
+    ///     .allowlist_function("WdfDeviceCreate")
+    ///     .generate()
+    ///     .expect("Failed to generate bindings");
+    /// ```
+    ///
+    /// # Configuration Details
+    ///
+    /// The builder is configured with:
+    ///
+    /// - **No std**: Uses `core` for kernel-mode compatibility
+    /// - **CStr generation**: Generates C string constants as `&CStr`
+    /// - **Default derives**: Adds `#[derive(Default)]` where possible
+    /// - **Include detection**: Disabled (uses explicit WDK paths)
+    /// - **Deprecated API blocklist**: Excludes legacy functions like:
+    ///   - `ExAllocatePool*` (use `ExAllocatePool2` instead)
+    ///   - `USBD_*` legacy functions
+    ///   - Internal-use-only USB IOCTLs
+    /// - **Opaque types**: Types without WDK definitions
+    /// - **Enum style**: Module-scoped constants (e.g., `ntstatus::STATUS_SUCCESS`)
+    /// - **Must-use types**: `NTSTATUS`, `HRESULT`
+    /// - **Callbacks**: Cargo rerun detection + WDF symbol renaming
     fn wdk_default(config: impl Borrow<Config> + fmt::Debug) -> Result<Builder, ConfigError>;
 }
 

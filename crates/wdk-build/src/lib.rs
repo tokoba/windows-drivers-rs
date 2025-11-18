@@ -1,14 +1,164 @@
 // Copyright (c) Microsoft Corporation
 // License: MIT OR Apache-2.0
 
-//! The [`wdk-build`][crate] crate is a library that is used within Cargo build
-//! scripts to configure any build that depends on the WDK (Windows Driver Kit).
-//! This is especially useful for crates that generate FFI bindings to the WDK,
-//! WDK-dependent libraries, and programs built on top of the WDK (ex. Drivers).
-//! This library is built to be able to accommodate different WDK releases, as
-//! well strives to allow for all the configuration the WDK allows. This
-//! includes being ables to select different WDF versions and different driver
-//! models (WDM, KMDF, UMDF).
+//! Build script library for configuring WDK-dependent Cargo builds.
+//!
+//! The [`wdk-build`][crate] crate provides build script (`build.rs`) utilities for
+//! projects that depend on the Windows Driver Kit (WDK). It automatically configures
+//! compiler flags, linker settings, include paths, and library paths needed to build
+//! Windows drivers and WDK-dependent libraries.
+//!
+//! # Overview
+//!
+//! This crate is designed to be used exclusively in Cargo build scripts. It handles:
+//! - Automatic WDK installation detection
+//! - Driver model configuration (WDM, KMDF, UMDF)
+//! - CPU architecture detection and configuration
+//! - Include path resolution for WDK headers
+//! - Library path resolution for WDK libraries
+//! - Linker flag configuration for driver binaries
+//! - Conditional compilation (`cfg`) setup
+//! - Integration with `bindgen` for FFI bindings
+//!
+//! # Supported Driver Models
+//!
+//! ## WDM (Windows Driver Model)
+//! The legacy kernel-mode driver model. Provides direct access to Windows kernel APIs
+//! but requires manual handling of PnP, Power, and all IRP processing.
+//!
+//! **Use cases**: Legacy driver maintenance, very simple kernel drivers
+//!
+//! ## KMDF (Kernel-Mode Driver Framework)
+//! Modern framework for kernel-mode drivers. Provides object-based abstractions and
+//! handles most PnP and Power management automatically.
+//!
+//! **Use cases**: Most new kernel-mode drivers, hardware drivers, filter drivers
+//!
+//! ## UMDF (User-Mode Driver Framework)
+//! Framework for user-mode drivers. Runs drivers in user space for improved
+//! stability and easier debugging.
+//!
+//! **Use cases**: Protocol drivers, virtual devices, sensor drivers, HID drivers
+//!
+//! # Usage
+//!
+//! ## For Driver Binaries
+//!
+//! In your driver's `build.rs`:
+//!
+//! ```rust,no_run
+//! fn main() {
+//!     wdk_build::configure_wdk_binary_build().unwrap();
+//! }
+//! ```
+//!
+//! This configures all necessary linker flags and library paths for the driver binary.
+//!
+//! ## For Libraries
+//!
+//! In your library's `build.rs`:
+//!
+//! ```rust,no_run
+//! fn main() {
+//!     wdk_build::configure_wdk_library_build().unwrap();
+//! }
+//! ```
+//!
+//! This sets up conditional compilation flags based on the driver model.
+//!
+//! ## Custom Configuration
+//!
+//! For advanced scenarios, manually create and configure a [`Config`]:
+//!
+//! ```rust,no_run
+//! use wdk_build::{Config, DriverConfig, KmdfConfig};
+//!
+//! fn main() {
+//!     let config = Config::from_env_auto().unwrap();
+//!
+//!     // Perform custom configuration based on driver model
+//!     match &config.driver_config {
+//!         DriverConfig::Kmdf(kmdf_config) => {
+//!             println!("Building KMDF driver version {}.{}",
+//!                 kmdf_config.kmdf_version_major,
+//!                 kmdf_config.target_kmdf_version_minor);
+//!         }
+//!         _ => {}
+//!     }
+//!
+//!     config.configure_binary_build().unwrap();
+//! }
+//! ```
+//!
+//! # Configuration via Cargo.toml
+//!
+//! Driver model and version are specified in `Cargo.toml` under `[package.metadata.wdk]`:
+//!
+//! ```toml
+//! [package.metadata.wdk]
+//! driver-type = "KMDF"
+//! kmdf-version-major = 1
+//! target-kmdf-version-minor = 33
+//! ```
+//!
+//! # Bindgen Integration
+//!
+//! Generate FFI bindings to WDK headers:
+//!
+//! ```rust,no_run
+//! use wdk_build::{Config, ApiSubset, BuilderExt};
+//!
+//! fn main() {
+//!     let config = Config::from_env_auto().unwrap();
+//!
+//!     // Configure bindgen with WDK headers
+//!     let bindings = bindgen::Builder::default()
+//!         .configure_wdk(&config, &[ApiSubset::Base, ApiSubset::Wdf])
+//!         .unwrap()
+//!         .generate()
+//!         .unwrap();
+//!
+//!     config.configure_library_build().unwrap();
+//! }
+//! ```
+//!
+//! # WDK Installation Detection
+//!
+//! The crate automatically detects WDK installation from:
+//! 1. `WDKContentRoot` environment variable (set by eWDK)
+//! 2. Standard installation paths on Windows
+//!
+//! # CPU Architecture
+//!
+//! Automatically detects target architecture from Cargo:
+//! - `x86_64` → AMD64
+//! - `aarch64` → ARM64
+//!
+//! # Error Handling
+//!
+//! Most functions return [`Result<_, ConfigError>`](ConfigError) which provides
+//! detailed error messages for:
+//! - Missing WDK installation
+//! - Invalid driver configuration
+//! - Missing include/library paths
+//! - Incorrect CRT linkage configuration
+//!
+//! # Features
+//!
+//! This crate has no optional features, but it does use nightly-only functionality
+//! when built with a nightly compiler (conditional on `nightly_toolchain` cfg).
+//!
+//! # Platform Support
+//!
+//! - **Build platform**: Windows (WDK must be installed)
+//! - **Target architectures**: AMD64 (x86_64), ARM64 (aarch64)
+//! - **Rust edition**: 2021+
+//!
+//! # See Also
+//!
+//! - [`wdk-sys`](https://crates.io/crates/wdk-sys): Raw FFI bindings to WDK
+//! - [`wdk`](https://crates.io/crates/wdk): Safe Rust wrappers for WDK
+//! - [WDK Documentation](https://learn.microsoft.com/en-us/windows-hardware/drivers/)
 
 #![cfg_attr(nightly_toolchain, feature(assert_matches))]
 use std::{
@@ -36,19 +186,190 @@ use thiserror::Error;
 
 use crate::utils::detect_windows_sdk_version;
 
-/// Configuration parameters for a build dependent on the WDK
+/// Configuration parameters for a WDK-dependent build.
+///
+/// The [`Config`] struct encapsulates all necessary information to configure a Cargo
+/// build that depends on the Windows Driver Kit. It automatically detects the WDK
+/// installation, target architecture, and driver model configuration.
+///
+/// # Fields
+///
+/// - `wdk_content_root`: Path to the WDK installation directory
+/// - `cpu_architecture`: Target CPU architecture (AMD64 or ARM64)
+/// - `driver_config`: Driver model and version information (WDM, KMDF, or UMDF)
+///
+/// # Usage
+///
+/// Most users should create a [`Config`] using [`Config::from_env_auto`], which
+/// automatically detects all configuration from the environment and Cargo metadata:
+///
+/// ```rust,no_run
+/// use wdk_build::Config;
+///
+/// let config = Config::from_env_auto().unwrap();
+/// config.configure_binary_build().unwrap();
+/// ```
+///
+/// For testing or custom scenarios, you can create a default config:
+///
+/// ```rust,no_run
+/// use wdk_build::{Config, DriverConfig, KmdfConfig};
+///
+/// let mut config = Config::new();
+/// config.driver_config = DriverConfig::Kmdf(KmdfConfig::new());
+/// ```
+///
+/// # Automatic Detection
+///
+/// [`Config::from_env_auto`] automatically detects:
+/// - **WDK installation**: From `WDKContentRoot` env var or standard install paths
+/// - **CPU architecture**: From `CARGO_CFG_TARGET_ARCH` environment variable
+/// - **Driver model**: From `[package.metadata.wdk]` in `Cargo.toml`
+///
+/// # Examples
+///
+/// Query configuration details:
+///
+/// ```rust,no_run
+/// use wdk_build::{Config, DriverConfig};
+///
+/// let config = Config::from_env_auto().unwrap();
+///
+/// match &config.driver_config {
+///     DriverConfig::Kmdf(kmdf) => {
+///         println!("KMDF version: {}.{}",
+///             kmdf.kmdf_version_major,
+///             kmdf.target_kmdf_version_minor);
+///     }
+///     DriverConfig::Umdf(umdf) => {
+///         println!("UMDF version: {}.{}",
+///             umdf.umdf_version_major,
+///             umdf.target_umdf_version_minor);
+///     }
+///     DriverConfig::Wdm => println!("WDM driver"),
+/// }
+/// ```
+///
+/// Get include paths for bindgen:
+///
+/// ```rust,no_run
+/// use wdk_build::Config;
+///
+/// let config = Config::from_env_auto().unwrap();
+/// for include_path in config.include_paths().unwrap() {
+///     println!("Include path: {}", include_path.display());
+/// }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
-    /// Path to root of WDK. Corresponds with `WDKContentRoot` environment
-    /// variable in eWDK
+    /// Path to root of WDK installation.
+    ///
+    /// Corresponds with the `WDKContentRoot` environment variable in eWDK.
+    /// Example: `C:\Program Files\Windows Kits\10`
     wdk_content_root: PathBuf,
-    /// CPU architecture to target
+
+    /// CPU architecture to target.
+    ///
+    /// Automatically detected from `CARGO_CFG_TARGET_ARCH`:
+    /// - `x86_64` → [`CpuArchitecture::Amd64`]
+    /// - `aarch64` → [`CpuArchitecture::Arm64`]
     cpu_architecture: CpuArchitecture,
-    /// Build configuration of driver
+
+    /// Driver model and associated configuration.
+    ///
+    /// Specifies whether this is a WDM, KMDF, or UMDF driver, along with
+    /// version information for WDF drivers. Read from `[package.metadata.wdk]`
+    /// in `Cargo.toml`.
     pub driver_config: DriverConfig,
 }
 
-/// The driver type with its associated configuration parameters
+/// Driver model with associated configuration parameters.
+///
+/// Specifies which Windows driver model is being used, along with version
+/// information for framework-based drivers (KMDF/UMDF).
+///
+/// # Variants
+///
+/// ## [`Wdm`](Self::Wdm)
+/// Legacy Windows Driver Model. Direct kernel API access with manual IRP handling.
+///
+/// **Characteristics:**
+/// - No framework overhead
+/// - Manual PnP and Power management
+/// - Complete control over driver behavior
+/// - More complex and error-prone
+///
+/// **When to use:** Legacy driver maintenance, extremely simple drivers
+///
+/// ## [`Kmdf`](Self::Kmdf)
+/// Kernel-Mode Driver Framework. Object-oriented framework for kernel drivers.
+///
+/// **Characteristics:**
+/// - Automatic PnP and Power management
+/// - Object-based abstractions (WDFDEVICE, WDFQUEUE, etc.)
+/// - Simplified I/O handling
+/// - Requires KMDF runtime library
+///
+/// **When to use:** Most new kernel-mode drivers (hardware, filters, etc.)
+///
+/// ## [`Umdf`](Self::Umdf)
+/// User-Mode Driver Framework. Framework for user-space drivers.
+///
+/// **Characteristics:**
+/// - Runs in user mode (better stability)
+/// - Cannot directly access hardware
+/// - Easier debugging
+/// - Access to standard Windows APIs
+///
+/// **When to use:** Protocol drivers, virtual devices, sensors, HID
+///
+/// # Configuration
+///
+/// Set in `Cargo.toml` under `[package.metadata.wdk]`:
+///
+/// ```toml
+/// # WDM driver
+/// [package.metadata.wdk]
+/// driver-type = "WDM"
+///
+/// # KMDF driver
+/// [package.metadata.wdk]
+/// driver-type = "KMDF"
+/// kmdf-version-major = 1
+/// target-kmdf-version-minor = 33
+///
+/// # UMDF driver
+/// [package.metadata.wdk]
+/// driver-type = "UMDF"
+/// umdf-version-major = 2
+/// target-umdf-version-minor = 33
+/// ```
+///
+/// # Examples
+///
+/// Match on driver type:
+///
+/// ```rust,no_run
+/// use wdk_build::{Config, DriverConfig};
+///
+/// let config = Config::from_env_auto().unwrap();
+///
+/// match &config.driver_config {
+///     DriverConfig::Wdm => {
+///         println!("Building WDM driver - manual IRP handling required");
+///     }
+///     DriverConfig::Kmdf(kmdf) => {
+///         println!("Building KMDF {}.{} driver",
+///             kmdf.kmdf_version_major,
+///             kmdf.target_kmdf_version_minor);
+///     }
+///     DriverConfig::Umdf(umdf) => {
+///         println!("Building UMDF {}.{} driver (user-mode)",
+///             umdf.umdf_version_major,
+///             umdf.target_umdf_version_minor);
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(
     tag = "DRIVER_TYPE",
@@ -57,11 +378,41 @@ pub struct Config {
     from = "DeserializableDriverConfig"
 )]
 pub enum DriverConfig {
-    /// Windows Driver Model
+    /// Windows Driver Model (WDM) - legacy kernel driver model.
+    ///
+    /// Direct access to Windows kernel APIs with manual handling of:
+    /// - IRP (I/O Request Packet) processing
+    /// - PnP (Plug and Play) state management
+    /// - Power management
+    /// - Device object creation and cleanup
+    ///
+    /// See: <https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/introduction-to-wdm>
     Wdm,
-    /// Kernel Mode Driver Framework
+
+    /// Kernel-Mode Driver Framework (KMDF) - modern kernel driver framework.
+    ///
+    /// Object-oriented framework providing:
+    /// - Automatic PnP and Power management
+    /// - Simplified I/O queue and request handling
+    /// - Object lifetime management
+    /// - Framework handles most infrastructure code
+    ///
+    /// Requires specifying major and minor version numbers via [`KmdfConfig`].
+    ///
+    /// See: <https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/what-s-new-for-wdf-drivers>
     Kmdf(KmdfConfig),
-    /// User Mode Driver Framework
+
+    /// User-Mode Driver Framework (UMDF) - user-mode driver framework.
+    ///
+    /// User-mode framework providing:
+    /// - Better stability (crashes don't BSOD)
+    /// - Easier debugging (standard debuggers)
+    /// - Access to user-mode APIs
+    /// - Automatic framework management
+    ///
+    /// Requires specifying major and minor version numbers via [`UmdfConfig`].
+    ///
+    /// See: <https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/getting-started-with-umdf-version-2>
     Umdf(UmdfConfig),
 }
 
@@ -84,12 +435,68 @@ enum DeserializableDriverConfig {
     Umdf(UmdfConfig),
 }
 
-/// The CPU architecture that's configured to be compiled for
+/// Target CPU architecture for the driver build.
+///
+/// Specifies which processor architecture the driver is being compiled for.
+/// This affects include paths, library paths, and compiler definitions.
+///
+/// # Architecture Detection
+///
+/// The architecture is automatically detected from Cargo's `TARGET` environment
+/// variable via [`CpuArchitecture::try_from_cargo_str`]:
+/// - `x86_64` → [`Amd64`](Self::Amd64)
+/// - `aarch64` → [`Arm64`](Self::Arm64)
+///
+/// # Platform Mapping
+///
+/// Each variant maps to Windows-specific architecture identifiers:
+/// - [`Amd64`](Self::Amd64) → `"x64"` in WDK paths
+/// - [`Arm64`](Self::Arm64) → `"ARM64"` in WDK paths
+///
+/// # Usage
+///
+/// ```rust,no_run
+/// use wdk_build::{Config, CpuArchitecture};
+///
+/// let config = Config::from_env_auto().unwrap();
+///
+/// // Architecture is automatically detected
+/// // For x86_64 target: config.cpu_architecture == CpuArchitecture::Amd64
+/// // For aarch64 target: config.cpu_architecture == CpuArchitecture::Arm64
+/// ```
+///
+/// # Preprocessor Definitions
+///
+/// Each architecture triggers specific compiler definitions:
+///
+/// **AMD64:**
+/// - `_WIN64`
+/// - `_AMD64_`
+/// - `AMD64`
+///
+/// **ARM64:**
+/// - `_ARM64_`
+/// - `ARM64`
+/// - `_USE_DECLSPECS_FOR_SAL=1`
+/// - `STD_CALL`
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CpuArchitecture {
-    /// AMD64 CPU architecture. Also known as x64 or x86-64.
+    /// AMD64 (x86-64) CPU architecture.
+    ///
+    /// Also known as x64 or x86-64. The 64-bit extension of the x86 instruction set.
+    ///
+    /// **Rust target triple**: `x86_64-pc-windows-msvc`
+    ///
+    /// **WDK path identifier**: `x64`
     Amd64,
-    /// ARM64 CPU architecture. Also known as aarch64.
+
+    /// ARM64 (aarch64) CPU architecture.
+    ///
+    /// Also known as aarch64. The 64-bit ARM architecture.
+    ///
+    /// **Rust target triple**: `aarch64-pc-windows-msvc`
+    ///
+    /// **WDK path identifier**: `ARM64`
     Arm64,
 }
 
@@ -115,33 +522,184 @@ impl fmt::Display for CpuArchitecture {
     }
 }
 
-/// The configuration parameters for KMDF drivers
+/// Configuration parameters for KMDF (Kernel-Mode Driver Framework) drivers.
+///
+/// Specifies the KMDF version requirements for a kernel-mode driver. KMDF uses
+/// a major.minor versioning scheme where:
+/// - **Major version**: Framework generation (currently 1 for all KMDF versions)
+/// - **Target minor version**: The KMDF version the driver is built against
+/// - **Minimum minor version**: Optional minimum KMDF version required at runtime
+///
+/// # Version Selection
+///
+/// The target version determines which KMDF features are available at compile time.
+/// The minimum version specifies the lowest KMDF runtime that can load the driver.
+///
+/// **Common versions:**
+/// - **1.33**: Windows 11 22H2, Windows Server 2022
+/// - **1.31**: Windows 10 21H1
+/// - **1.29**: Windows 10 20H1
+/// - **1.15**: Windows 10 1703 (Creators Update)
+/// - **1.11**: Windows 10 1511
+///
+/// See: <https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/kmdf-version-history>
+///
+/// # Configuration
+///
+/// Set in `Cargo.toml` under `[package.metadata.wdk]`:
+///
+/// ```toml
+/// [package.metadata.wdk]
+/// driver-type = "KMDF"
+/// kmdf-version-major = 1
+/// target-kmdf-version-minor = 33
+/// # Optional: specify minimum required version
+/// minimum-kmdf-version-minor = 15
+/// ```
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use wdk_build::{Config, DriverConfig};
+///
+/// let config = Config::from_env_auto().unwrap();
+///
+/// if let DriverConfig::Kmdf(kmdf) = &config.driver_config {
+///     println!("KMDF version: {}.{}",
+///         kmdf.kmdf_version_major,
+///         kmdf.target_kmdf_version_minor);
+///
+///     if let Some(min_version) = kmdf.minimum_kmdf_version_minor {
+///         println!("Requires at least KMDF 1.{}", min_version);
+///     }
+/// }
+/// ```
+///
+/// # Version Compatibility
+///
+/// Drivers built against a newer KMDF version can run on older systems if:
+/// 1. The older system has the minimum required version installed
+/// 2. The driver doesn't use APIs introduced after the minimum version
+/// 3. The `minimum_kmdf_version_minor` is set appropriately
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(
     deny_unknown_fields,
     rename_all(serialize = "SCREAMING_SNAKE_CASE", deserialize = "kebab-case")
 )]
 pub struct KmdfConfig {
-    /// Major KMDF Version
+    /// Major KMDF version number.
+    ///
+    /// Currently always `1` for all KMDF versions. Future KMDF generations
+    /// would increment this number.
     pub kmdf_version_major: u8,
-    /// Minor KMDF Version (Target Version)
+
+    /// Target KMDF minor version number.
+    ///
+    /// Specifies which KMDF version the driver is compiled against. This
+    /// determines which KMDF APIs are available. Common values: 15, 29, 31, 33.
+    ///
+    /// Example: `33` for KMDF 1.33 (Windows 11 22H2)
     pub target_kmdf_version_minor: u8,
-    /// Minor KMDF Version (Minimum Required)
+
+    /// Minimum required KMDF minor version number (optional).
+    ///
+    /// Specifies the lowest KMDF runtime version that can load this driver.
+    /// If not set, defaults to the target version (driver won't load on older systems).
+    ///
+    /// Example: Set to `15` to allow driver to load on Windows 10 1703 and later,
+    /// even if built against KMDF 1.33.
     pub minimum_kmdf_version_minor: Option<u8>,
 }
 
-/// The configuration parameters for UMDF drivers
+/// Configuration parameters for UMDF (User-Mode Driver Framework) drivers.
+///
+/// Specifies the UMDF version requirements for a user-mode driver. UMDF uses
+/// a major.minor versioning scheme where:
+/// - **Major version**: Framework generation (1 for UMDF 1.x, 2 for UMDF 2.x)
+/// - **Target minor version**: The UMDF version the driver is built against
+/// - **Minimum minor version**: Optional minimum UMDF version required at runtime
+///
+/// # UMDF Versions
+///
+/// ## UMDF 2.x (Recommended)
+/// Modern UMDF version with KMDF-compatible API surface. Uses `NTSTATUS` error codes
+/// and provides better consistency with kernel-mode development.
+///
+/// **Common versions:**
+/// - **2.33**: Windows 11 22H2, Windows Server 2022
+/// - **2.31**: Windows 10 21H1
+/// - **2.29**: Windows 10 20H1
+/// - **2.15**: Windows 10 1703
+///
+/// ## UMDF 1.x (Legacy)
+/// Original UMDF version with COM-based API. Not recommended for new development.
+///
+/// See: <https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/umdf-version-history>
+///
+/// # Configuration
+///
+/// Set in `Cargo.toml` under `[package.metadata.wdk]`:
+///
+/// ```toml
+/// [package.metadata.wdk]
+/// driver-type = "UMDF"
+/// umdf-version-major = 2
+/// target-umdf-version-minor = 33
+/// # Optional: specify minimum required version
+/// minimum-umdf-version-minor = 15
+/// ```
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use wdk_build::{Config, DriverConfig};
+///
+/// let config = Config::from_env_auto().unwrap();
+///
+/// if let DriverConfig::Umdf(umdf) = &config.driver_config {
+///     println!("UMDF version: {}.{}",
+///         umdf.umdf_version_major,
+///         umdf.target_umdf_version_minor);
+///
+///     if umdf.umdf_version_major >= 2 {
+///         println!("Using modern UMDF 2.x API");
+///     }
+/// }
+/// ```
+///
+/// # Version Compatibility
+///
+/// Like KMDF, UMDF drivers can target newer versions while maintaining
+/// compatibility with older runtimes by setting `minimum_umdf_version_minor`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(
     deny_unknown_fields,
     rename_all(serialize = "SCREAMING_SNAKE_CASE", deserialize = "kebab-case")
 )]
 pub struct UmdfConfig {
-    /// Major UMDF Version
+    /// Major UMDF version number.
+    ///
+    /// - `1`: UMDF 1.x (COM-based, legacy)
+    /// - `2`: UMDF 2.x (KMDF-compatible API, recommended)
+    ///
+    /// UMDF 2.x is strongly recommended for all new development.
     pub umdf_version_major: u8,
-    /// Minor UMDF Version (Target Version)
+
+    /// Target UMDF minor version number.
+    ///
+    /// Specifies which UMDF version the driver is compiled against. This
+    /// determines which UMDF APIs are available. Common values: 15, 29, 31, 33.
+    ///
+    /// Example: `33` for UMDF 2.33 (Windows 11 22H2)
     pub target_umdf_version_minor: u8,
-    /// Minor UMDF Version (Minimum Required)
+
+    /// Minimum required UMDF minor version number (optional).
+    ///
+    /// Specifies the lowest UMDF runtime version that can load this driver.
+    /// If not set, defaults to the target version (driver won't load on older systems).
+    ///
+    /// Example: Set to `15` to allow driver to load on Windows 10 1703 and later,
+    /// even if built against UMDF 2.33.
     pub minimum_umdf_version_minor: Option<u8>,
 }
 
@@ -316,24 +874,203 @@ rustflags = [\"-C\", \"target-feature=+crt-static\"]
     SerdeError(#[from] metadata::Error),
 }
 
-/// Subset of APIs in the Windows Driver Kit
+/// WDK API subset for selective header inclusion.
+///
+/// Specifies which subset of WDK headers to include when generating FFI bindings
+/// with `bindgen`. This allows you to selectively include only the headers relevant
+/// to your driver type, reducing compilation time and avoiding unnecessary symbols.
+///
+/// # Usage with Bindgen
+///
+/// Use [`Config::headers`] or [`Config::bindgen_header_contents`] to get the appropriate
+/// headers for a given API subset:
+///
+/// ```rust,no_run
+/// use wdk_build::{Config, ApiSubset, BuilderExt};
+///
+/// let config = Config::from_env_auto().unwrap();
+///
+/// let bindings = bindgen::Builder::default()
+///     .configure_wdk(&config, &[
+///         ApiSubset::Base,    // Core WDK APIs
+///         ApiSubset::Wdf,     // WDF framework
+///         ApiSubset::Usb,     // USB-specific APIs
+///     ])
+///     .unwrap()
+///     .generate()
+///     .unwrap();
+/// ```
+///
+/// # API Subset Categories
+///
+/// ## Core APIs
+///
+/// - [`Base`](Self::Base): Essential APIs for all drivers (ntddk.h, ntifs.h, windows.h)
+/// - [`Wdf`](Self::Wdf): Windows Driver Framework APIs (wdf.h)
+///
+/// ## Device-Specific APIs
+///
+/// - [`Gpio`](Self::Gpio): GPIO (General Purpose I/O) controller drivers
+/// - [`Hid`](Self::Hid): HID (Human Interface Device) drivers
+/// - [`ParallelPorts`](Self::ParallelPorts): Legacy parallel port drivers
+/// - [`Spb`](Self::Spb): SPB (Serial Peripheral Bus) drivers (I²C, SPI)
+/// - [`Storage`](Self::Storage): Storage and file system drivers
+/// - [`Usb`](Self::Usb): USB device and host controller drivers
+///
+/// # Header Selection
+///
+/// Each API subset includes different headers depending on the driver model:
+///
+/// **Base** (WDM/KMDF):
+/// - `ntifs.h`: NT file system and filter drivers
+/// - `ntddk.h`: Core NT kernel APIs
+/// - `ntstrsafe.h`: Safe string manipulation
+///
+/// **Base** (UMDF):
+/// - `windows.h`: Standard Windows APIs
+///
+/// **Wdf** (KMDF/UMDF):
+/// - `wdf.h`: WDF framework APIs
+///
+/// # Examples
+///
+/// Generate bindings for USB KMDF driver:
+///
+/// ```rust,no_run
+/// use wdk_build::{Config, ApiSubset, BuilderExt};
+///
+/// let config = Config::from_env_auto().unwrap();
+///
+/// // USB driver needs Base + WDF + USB APIs
+/// bindgen::Builder::default()
+///     .configure_wdk(&config, &[
+///         ApiSubset::Base,
+///         ApiSubset::Wdf,
+///         ApiSubset::Usb,
+///     ])
+///     .unwrap()
+///     .generate()
+///     .unwrap();
+/// ```
+///
+/// Generate bindings for storage filter driver:
+///
+/// ```rust,no_run
+/// use wdk_build::{Config, ApiSubset, BuilderExt};
+///
+/// let config = Config::from_env_auto().unwrap();
+///
+/// // WDM storage driver needs Base + Storage APIs
+/// bindgen::Builder::default()
+///     .configure_wdk(&config, &[
+///         ApiSubset::Base,
+///         ApiSubset::Storage,
+///     ])
+///     .unwrap()
+///     .generate()
+///     .unwrap();
+/// ```
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ApiSubset {
-    /// API subset typically required for all Windows drivers
+    /// Core WDK APIs required for all drivers.
+    ///
+    /// **KMDF/WDM headers:**
+    /// - `ntifs.h`: NT file system APIs
+    /// - `ntddk.h`: Core kernel APIs (memory, synchronization, IRPs, etc.)
+    /// - `ntstrsafe.h`: Safe string manipulation
+    ///
+    /// **UMDF headers:**
+    /// - `windows.h`: Standard Windows user-mode APIs
+    ///
+    /// See: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/>
     Base,
-    /// API subset required for WDF (Windows Driver Framework) drivers: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_wdf/>
+
+    /// Windows Driver Framework APIs (KMDF/UMDF).
+    ///
+    /// **Headers:**
+    /// - `wdf.h`: WDF framework APIs (objects, queues, requests, etc.)
+    ///
+    /// Required for all KMDF and UMDF drivers.
+    ///
+    /// See: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_wdf/>
     Wdf,
-    /// API subset for GPIO (General Purpose Input/Output) drivers: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_gpio/>
+
+    /// GPIO (General Purpose Input/Output) controller drivers.
+    ///
+    /// **Headers:**
+    /// - `gpio.h`: GPIO definitions
+    /// - `gpioclx.h`: GPIO class extension (KMDF only)
+    ///
+    /// For drivers that manage GPIO controllers.
+    ///
+    /// See: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_gpio/>
     Gpio,
-    /// API subset for HID (Human Interface Device) drivers: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_hid/>
+
+    /// HID (Human Interface Device) drivers.
+    ///
+    /// **Headers:**
+    /// - `hidclass.h`: HID class driver
+    /// - `hidsdi.h`: HID user-mode API
+    /// - `hidpi.h`: HID parser
+    /// - `vhf.h`: Virtual HID Framework
+    /// - And more (varies by driver model)
+    ///
+    /// For drivers that implement HID devices (keyboards, mice, game controllers, etc.).
+    ///
+    /// See: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_hid/>
     Hid,
-    /// API subset for Parallel Ports drivers: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_parports/>
+
+    /// Legacy parallel and serial port drivers.
+    ///
+    /// **Headers:**
+    /// - `ntddpar.h`: Parallel port definitions
+    /// - `ntddser.h`: Serial port definitions
+    /// - `parallel.h`: Parallel port driver (WDM/KMDF only)
+    ///
+    /// For drivers managing legacy COM and LPT ports.
+    ///
+    /// See: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_parports/>
     ParallelPorts,
-    /// API subset for SPB (Serial Peripheral Bus) drivers: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_spb/>
+
+    /// SPB (Serial Peripheral Bus) drivers (I²C, SPI, etc.).
+    ///
+    /// **Headers:**
+    /// - `spb.h`: SPB definitions
+    /// - `reshub.h`: Resource hub
+    /// - `pwmutil.h`: PWM utilities (WDM/KMDF only)
+    /// - `spbcx.h`: SPB class extension (KMDF only)
+    ///
+    /// For drivers managing I²C, SPI, and other serial buses.
+    ///
+    /// See: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_spb/>
     Spb,
-    /// API subset for Storage drivers: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_storage/>
+
+    /// Storage and file system drivers.
+    ///
+    /// **Headers:**
+    /// - `ntddstor.h`: Storage definitions
+    /// - `ntddscsi.h`: SCSI definitions
+    /// - `ntdddisk.h`: Disk definitions
+    /// - `storport.h`: StorPort miniport (WDM/KMDF only)
+    /// - And more
+    ///
+    /// For drivers managing storage devices (disks, RAID controllers, etc.).
+    ///
+    /// See: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_storage/>
     Storage,
-    /// API subset for USB (Universal Serial Bus) drivers: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_usbref/>
+
+    /// USB (Universal Serial Bus) drivers.
+    ///
+    /// **Headers:**
+    /// - `usb.h`: USB definitions
+    /// - `usbdlib.h`: USB driver library (WDM/KMDF only)
+    /// - `wdfusb.h`: WDF USB APIs (KMDF/UMDF only)
+    /// - `UcmCx.h`: USB Type-C connector manager (KMDF only)
+    /// - And more
+    ///
+    /// For drivers managing USB devices, host controllers, and hubs.
+    ///
+    /// See: <https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_usbref/>
     Usb,
 }
 
