@@ -1,9 +1,91 @@
 // Copyright (c) Microsoft Corporation
 // License: MIT OR Apache-2.0
 
-//! A collection of macros that help make it easier to interact with
-//! [`wdk_sys`](../wdk_sys/index.html)'s direct bindings to the Windows Driver
-//! Kit (WDK).
+//! Procedural macros for Windows Driver Framework (WDF) function bindings.
+//!
+//! This crate provides procedural macros that enable type-safe calls to WDF API
+//! functions, which are accessed through a version-specific function table rather
+//! than direct linking.
+//!
+//! # Overview
+//!
+//! The Windows Driver Framework uses an indirect calling convention where:
+//! 1. The driver receives a function table during initialization (`DriverEntry`)
+//! 2. All WDF APIs are accessed through this table via function pointers
+//! 3. The table layout varies by WDF version
+//!
+//! This design allows binary compatibility across WDF versions, but makes it
+//! challenging to call WDF functions from Rust. This crate bridges that gap.
+//!
+//! # Main Macro: `call_unsafe_wdf_function_binding`
+//!
+//! The [`call_unsafe_wdf_function_binding!`] macro generates code to:
+//! - Look up the function pointer in the WDF function table
+//! - Validate the function index against the table size
+//! - Perform type-safe calls with correct parameter passing
+//! - Handle different calling conventions and ABIs
+//!
+//! # Usage
+//!
+//! This macro is primarily used internally by [`wdk_sys`](../wdk_sys/index.html).
+//! Users of `wdk_sys` don't call this macro directly - instead, they use the
+//! generated function bindings that wrap this macro.
+//!
+//! ## Internal Usage Example
+//!
+//! ```rust,ignore
+//! // Inside wdk_sys::wdf module:
+//! call_unsafe_wdf_function_binding!(
+//!     WdfDeviceCreate,
+//!     device_init,
+//!     &device_attributes,
+//!     &mut device
+//! )
+//! ```
+//!
+//! # Implementation Details
+//!
+//! The macro:
+//! 1. Parses the function name and arguments
+//! 2. Looks up function metadata from bindgen-generated types
+//! 3. Caches function signatures to avoid repeated parsing
+//! 4. Generates efficient function table access code
+//! 5. Validates table bounds at runtime
+//!
+//! # Caching
+//!
+//! Function signature information is cached in `WDF_FUNCTION_INFO_CACHE.json`
+//! to improve build performance. The cache is invalidated when WDK headers change.
+//!
+//! # Safety
+//!
+//! While this macro generates `unsafe` code, it provides several safety guarantees:
+//! - Runtime validation of function table indices
+//! - Type checking of parameters against expected signatures
+//! - Proper handling of calling conventions
+//!
+//! Callers are still responsible for:
+//! - Ensuring WDF has been initialized (function table is valid)
+//! - Passing correct pointer lifetimes
+//! - Following WDF API contracts (IRQL, synchronization, etc.)
+//!
+//! # Performance
+//!
+//! The generated code is zero-cost:
+//! - No runtime overhead beyond a bounds check
+//! - Inlines into direct function pointer calls
+//! - No dynamic dispatch or reflection
+//!
+//! # Limitations
+//!
+//! - Requires access to bindgen-generated type information
+//! - Only works with WDF functions (not general WDK APIs)
+//! - Function table must be initialized before use
+//!
+//! # See Also
+//!
+//! - [`wdk_sys`](../wdk_sys/index.html): Uses this macro for WDF bindings
+//! - [WDF Architecture](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/)</ wdf architecture guide>
 
 use std::{collections::BTreeMap, path::PathBuf, str::FromStr};
 

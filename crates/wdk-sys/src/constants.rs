@@ -1,6 +1,90 @@
 // Copyright (c) Microsoft Corporation
 // License: MIT OR Apache-2.0
 
+//! Windows Driver Kit (WDK) constant definitions.
+//!
+//! This module contains all constant values from the WDK headers, including:
+//!
+//! # NTSTATUS Codes
+//!
+//! Status codes returned by kernel-mode functions:
+//! - `STATUS_SUCCESS`: Successful operation (0x00000000)
+//! - `STATUS_UNSUCCESSFUL`: Generic failure (0xC0000001)
+//! - `STATUS_ACCESS_DENIED`: Access denied (0xC0000022)
+//! - `STATUS_BUFFER_TOO_SMALL`: Insufficient buffer (0xC0000023)
+//! - `STATUS_PENDING`: Operation is pending async completion (0x00000103)
+//! - And hundreds more status codes...
+//!
+//! # IOCTL Codes
+//!
+//! I/O Control codes for device communication:
+//! - `IOCTL_*`: Device control codes for various device types
+//! - Control codes are typically constructed using the `CTL_CODE` macro
+//!
+//! # IRP Major and Minor Function Codes
+//!
+//! - `IRP_MJ_*`: Major function codes (CREATE, READ, WRITE, CLOSE, etc.)
+//! - `IRP_MN_*`: Minor function codes for PnP and Power operations
+//!
+//! # Memory Pool Tags
+//!
+//! - Pool allocation types and flags
+//! - Memory pool priorities
+//!
+//! # IRQL Levels
+//!
+//! - `PASSIVE_LEVEL`: Standard thread execution (0)
+//! - `APC_LEVEL`: Asynchronous Procedure Call level (1)
+//! - `DISPATCH_LEVEL`: Dispatcher/DPC level (2)
+//! - `DIRQL`: Device IRQLs (3-31)
+//!
+//! # Device Types
+//!
+//! - `FILE_DEVICE_*`: Device type constants for device creation
+//!
+//! # Access Rights and Security
+//!
+//! - Generic access rights (`GENERIC_READ`, `GENERIC_WRITE`, etc.)
+//! - Specific access rights for various object types
+//!
+//! # WDF Constants
+//!
+//! Constants specific to Windows Driver Framework (KMDF/UMDF):
+//! - Object attribute flags
+//! - Synchronization scope and execution level values
+//! - Device and queue configuration constants
+//!
+//! # Device-Specific Constants
+//!
+//! When feature flags are enabled, this module also includes constants for:
+//! - GPIO operations (feature: `gpio`)
+//! - HID devices (feature: `hid`)
+//! - USB devices (feature: `usb`)
+//! - SPB protocols (feature: `spb`)
+//! - Storage devices (feature: `storage`)
+//! - Parallel ports (feature: `parallel-ports`)
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use wdk_sys::{STATUS_SUCCESS, STATUS_INSUFFICIENT_RESOURCES, PASSIVE_LEVEL};
+//! use wdk_sys::NT_SUCCESS;
+//!
+//! fn example(status: wdk_sys::NTSTATUS) {
+//!     if NT_SUCCESS(status) {
+//!         // Success case
+//!     } else if status == STATUS_INSUFFICIENT_RESOURCES {
+//!         // Handle out-of-memory
+//!     }
+//! }
+//! ```
+//!
+//! # Generated Code
+//!
+//! This module contains auto-generated bindgen code. The `#[allow(missing_docs)]`
+//! attribute is applied because the WDK headers often lack inline documentation,
+//! making it impossible for bindgen to generate doc comments for all constants.
+
 #![allow(missing_docs)]
 
 pub use bindings::*;
@@ -30,23 +114,90 @@ mod bindings {
     include!(concat!(env!("OUT_DIR"), "/constants.rs"));
 }
 
+/// Windows Driver Framework (WDF) specific constants.
+///
+/// These constants provide null/empty values for various WDF parameters,
+/// allowing callers to indicate "no value" or "use default" for optional
+/// parameters in WDF API calls.
 #[cfg(any(driver_model__driver_type = "KMDF", driver_model__driver_type = "UMDF"))]
 mod wdf {
     use crate::types::{PVOID, PWDF_OBJECT_ATTRIBUTES};
 
+    /// Indicates no object attributes should be applied.
+    ///
+    /// Use this constant when calling WDF functions that accept optional
+    /// `PWDF_OBJECT_ATTRIBUTES` parameters and you want to use default attributes.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # #[cfg(any(driver_model__driver_type = "KMDF", driver_model__driver_type = "UMDF"))]
+    /// # {
+    /// use wdk_sys::WDF_NO_OBJECT_ATTRIBUTES;
+    /// // When creating a WDF object without custom attributes:
+    /// // WdfObjectCreate(..., WDF_NO_OBJECT_ATTRIBUTES, ...)
+    /// # }
+    /// ```
     pub const WDF_NO_OBJECT_ATTRIBUTES: PWDF_OBJECT_ATTRIBUTES = core::ptr::null_mut();
+
+    /// Indicates no event callback function.
+    ///
+    /// Use this when an event callback parameter is optional and you don't
+    /// want to provide a callback function.
     pub const WDF_NO_EVENT_CALLBACK: PVOID = core::ptr::null_mut();
+
+    /// Indicates no WDF handle.
+    ///
+    /// Use this for optional WDF handle parameters when you want to pass
+    /// a null handle value.
     pub const WDF_NO_HANDLE: PVOID = core::ptr::null_mut();
+
+    /// Indicates no context data.
+    ///
+    /// Use this for optional context pointer parameters when you don't
+    /// need to associate custom context data with a WDF object.
     pub const WDF_NO_CONTEXT: PVOID = core::ptr::null_mut();
+
+    /// Indicates no send options.
+    ///
+    /// Use this when calling WDF I/O functions that accept optional send
+    /// options and you want to use default sending behavior.
     pub const WDF_NO_SEND_OPTIONS: PVOID = core::ptr::null_mut();
 }
 
+/// Kernel-mode specific constants.
+///
+/// These constants are only available for WDM and KMDF drivers running in kernel mode.
+/// They include memory pool flags and other kernel-specific values that cannot be
+/// automatically generated by bindgen due to C macro limitations.
 #[cfg(any(driver_model__driver_type = "WDM", driver_model__driver_type = "KMDF"))]
 mod kernel_mode {
     use crate::types::POOL_FLAGS;
 
     // Macros with MSVC C Integer Constant Suffixes are not supported by bindgen, so they must be manually ported or imported from elsewhere: https://github.com/rust-lang/rust-bindgen/issues/2600
+
+    /// Start marker for required pool allocation flags.
+    ///
+    /// This constant marks the beginning of the range of required pool flags
+    /// that must be specified when allocating kernel memory pools.
     pub const POOL_FLAG_REQUIRED_START: POOL_FLAGS = 0x0000_0000_0000_0001;
+
+    /// Charge pool allocation against process quota.
+    ///
+    /// When specified in a pool allocation, this flag causes the allocated
+    /// memory to be charged against the current process's memory quota rather
+    /// than coming from the general kernel pool.
+    ///
+    /// # Use Cases
+    ///
+    /// - Allocating memory on behalf of a user-mode process
+    /// - Ensuring resource limits are enforced per-process
+    /// - Preventing a single process from exhausting kernel memory
+    ///
+    /// # Safety
+    ///
+    /// Only use this flag when appropriate quota accounting is desired.
+    /// Incorrect use can lead to unexpected quota errors or resource exhaustion.
     pub const POOL_FLAG_USE_QUOTA: POOL_FLAGS = 0x0000_0000_0000_0001; // Charge quota
     pub const POOL_FLAG_UNINITIALIZED: POOL_FLAGS = 0x0000_0000_0000_0002; // Don't zero-initialize allocation
     pub const POOL_FLAG_SESSION: POOL_FLAGS = 0x0000_0000_0000_0004; // Use session specific pool
