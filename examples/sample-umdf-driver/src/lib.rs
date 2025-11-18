@@ -1,10 +1,109 @@
 // Copyright (c) Microsoft Corporation
 // License: MIT OR Apache-2.0
 
-//! # Sample UMDF Driver
+//! # Sample UMDF (User-Mode Driver Framework) Driver
 //!
-//! This is a sample UMDF driver that demonstrates how to use the crates in
-//! windows-driver-rs to create a skeleton of a UMDF driver.
+//! This is a complete, minimal UMDF driver that demonstrates the essential components
+//! needed to create a working user-mode driver using the `windows-drivers-rs` crates.
+//!
+//! # What This Example Demonstrates
+//!
+//! - **DriverEntry**: The required entry point for UMDF drivers
+//! - **WDF Driver Configuration**: Setting up the WDF driver object with callbacks
+//! - **Device Creation**: Handling PnP device addition via `EvtDriverDeviceAdd`
+//! - **Driver Unload**: Cleanup via `EvtDriverUnload`
+//! - **Debug Printing**: Both raw `OutputDebugStringA` and the `println!` macro
+//! - **String Handling**: Converting UTF-16 UNICODE_STRING to Rust String
+//!
+//! # UMDF vs. KMDF
+//!
+//! Unlike KMDF (kernel-mode), UMDF drivers:
+//! - Run in user mode (not kernel mode)
+//! - Have access to the standard library (`std`)
+//! - Don't need custom allocators or panic handlers
+//! - Can't directly access hardware (must go through kernel)
+//! - Are safer and easier to debug (crashes don't BSOD)
+//! - Use `OutputDebugStringA` instead of `DbgPrint`
+//!
+//! # Key Concepts
+//!
+//! ## UMDF Driver Lifecycle
+//!
+//! 1. **Load**: WUDFHost.exe loads the driver DLL and calls `DriverEntry`
+//! 2. **Initialize**: Driver creates WDF driver object with `WdfDriverCreate`
+//! 3. **Device Add**: For each device, `EvtDriverDeviceAdd` is called
+//! 4. **Operation**: Driver handles I/O requests from applications
+//! 5. **Unload**: `EvtDriverUnload` is called during cleanup
+//!
+//! ## User-Mode Advantages
+//!
+//! - **Easier debugging**: Use standard debuggers (Visual Studio, WinDbg user-mode)
+//! - **Better isolation**: Crashes don't affect the kernel
+//! - **Standard APIs**: Can use Windows APIs not available in kernel mode
+//! - **Memory safety**: Virtual memory protection prevents some bugs
+//!
+//! ## When to Use UMDF
+//!
+//! UMDF is appropriate for:
+//! - Protocol drivers (USB, Bluetooth, etc.)
+//! - Virtual devices
+//! - Drivers that don't need direct hardware access
+//! - Sensor and HID drivers
+//! - Drivers where development speed and safety are priorities
+//!
+//! # Building This Driver
+//!
+//! ```bash
+//! cargo make
+//! ```
+//!
+//! This builds the driver `.dll` file and driver package.
+//!
+//! # Installing and Loading
+//!
+//! 1. **Enable Test Signing** (for development):
+//!    ```cmd
+//!    bcdedit /set testsigning on
+//!    ```
+//!    Then reboot.
+//!
+//! 2. **Install the driver** using Device Manager or `pnputil`:
+//!    ```cmd
+//!    pnputil /add-driver path\to\driver.inf /install
+//!    ```
+//!
+//! 3. **View debug output** using DebugView
+//!
+//! # Debug Output
+//!
+//! When loaded, this driver prints:
+//! ```text
+//! Hello World!
+//! UMDF Driver Entry Complete! Driver Registry Parameter Key: \REGISTRY\...
+//! EvtDriverDeviceAdd Entered!
+//! WdfDeviceCreate NTSTATUS: 0x00
+//! ```
+//!
+//! When unloaded:
+//! ```text
+//! Goodbye World!
+//! Driver Exit Complete!
+//! ```
+//!
+//! # Extending This Example
+//!
+//! To create a functional UMDF driver, you would add:
+//! - I/O queue creation and request handling
+//! - Device interface registration
+//! - File handle management
+//! - Power management
+//! - PnP capabilities
+//!
+//! # See Also
+//!
+//! - [UMDF Programming Guide](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/getting-started-with-umdf-version-2)
+//! - [DriverEntry for UMDF](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/driverentry-for-umdf-drivers)
+//! - [UMDF vs KMDF](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/comparing-umdf-2-0-functionality-to-kmdf)
 
 use std::{ffi::CString, slice, string::String};
 

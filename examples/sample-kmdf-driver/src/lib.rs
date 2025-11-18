@@ -1,10 +1,101 @@
 // Copyright (c) Microsoft Corporation
 // License: MIT OR Apache-2.0
 
-//! # Sample KMDF Driver
+//! # Sample KMDF (Kernel-Mode Driver Framework) Driver
 //!
-//! This is a sample KMDF driver that demonstrates how to use the crates in
-//! windows-driver-rs to create a skeleton of a kmdf driver.
+//! This is a complete, minimal KMDF driver that demonstrates the essential components
+//! needed to create a working kernel-mode driver using the `windows-drivers-rs` crates.
+//!
+//! # What This Example Demonstrates
+//!
+//! - **DriverEntry**: The required entry point for all Windows drivers
+//! - **WDF Driver Configuration**: Setting up the WDF driver object with callbacks
+//! - **Device Creation**: Handling PnP device addition via `EvtDriverDeviceAdd`
+//! - **Debug Printing**: Both raw `DbgPrint` and the `println!` macro
+//! - **Memory Allocation**: Using `WdkAllocator` for heap allocations
+//! - **Panic Handling**: Using `wdk_panic` for `no_std` panic behavior
+//! - **String Handling**: Converting UTF-16 UNICODE_STRING to Rust String
+//!
+//! # Key Concepts
+//!
+//! ## KMDF Driver Lifecycle
+//!
+//! 1. **Load**: Windows loads the driver and calls `DriverEntry`
+//! 2. **Initialize**: Driver creates WDF driver object with `WdfDriverCreate`
+//! 3. **Device Add**: For each device, `EvtDriverDeviceAdd` is called
+//! 4. **Operation**: Driver handles I/O and PnP events (not shown in this minimal example)
+//! 5. **Unload**: `DriverUnload` callback is invoked during driver cleanup
+//!
+//! ## no_std Environment
+//!
+//! KMDF drivers run in kernel mode without access to the standard library:
+//! - Use `#![no_std]` to disable std
+//! - Use `extern crate alloc` for heap allocations
+//! - Use `WdkAllocator` as the global allocator
+//! - Use `wdk_panic` for panic handling
+//!
+//! ## Safety Requirements
+//!
+//! All WDF function calls are `unsafe` because they:
+//! - Dereference raw pointers from Windows
+//! - Require following specific API contracts
+//! - Must respect IRQL restrictions
+//! - Can cause system crashes if misused
+//!
+//! # Building This Driver
+//!
+//! ```bash
+//! cargo make
+//! ```
+//!
+//! This builds the driver `.sys` file and driver package.
+//!
+//! # Installing and Loading
+//!
+//! 1. **Enable Test Signing** (for development):
+//!    ```cmd
+//!    bcdedit /set testsigning on
+//!    ```
+//!    Then reboot.
+//!
+//! 2. **Install the driver** using Device Manager or `pnputil`:
+//!    ```cmd
+//!    pnputil /add-driver path\to\driver.inf /install
+//!    ```
+//!
+//! 3. **View debug output** using DebugView or WinDbg
+//!
+//! # Debug Output
+//!
+//! When loaded, this driver prints:
+//! ```text
+//! Hello World!
+//! KMDF Driver Entry Complete! Driver Registry Parameter Key: \REGISTRY\...
+//! EvtDriverDeviceAdd Entered!
+//! WdfDeviceCreate NTSTATUS: 0x00
+//! ```
+//!
+//! When unloaded:
+//! ```text
+//! Goodbye World!
+//! Driver Exit Complete!
+//! ```
+//!
+//! # Extending This Example
+//!
+//! To create a functional driver, you would add:
+//! - I/O queue creation and callbacks
+//! - Device interface registration
+//! - Hardware initialization
+//! - Interrupt handling
+//! - Power management callbacks
+//! - PnP state machine handling
+//!
+//! # See Also
+//!
+//! - [KMDF Programming Guide](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/index)
+//! - [DriverEntry Documentation](https://learn.microsoft.com/en-us/windows-hardware/drivers/wdf/driverentry-for-kmdf-drivers)
+//! - [WdfDriverCreate](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdfdriver/nf-wdfdriver-wdfdrivercreate)
 
 #![no_std]
 
